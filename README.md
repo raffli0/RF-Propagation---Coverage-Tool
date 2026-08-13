@@ -7,7 +7,6 @@ This project is designed to model and analyze radio frequency (RF) propagation a
 - **RF Propagation Modeling**: Simulate RF signal propagation in different environments (Free Space, Rain, Gas, Fog, Close-In, Longley-Rice, TIREM, Ray Tracing).
 - **Coverage Analysis**: Visualize coverage maps (path loss / elevation heatmaps) and determine signal strength in specific areas.
 - **Offline Elevation**: SRTM-derived terrain elevation for map areas, cached locally under `~/.cache/rf_propagation` after the first download.
-- **Drawable Coverage Area**: Draw a polygon/rectangle on the map to clip the heatmap contour.
 
 ## Project structure
 

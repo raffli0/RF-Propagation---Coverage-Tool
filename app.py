@@ -199,6 +199,23 @@ with st.sidebar:
     with st.expander("2. Propagation Model", expanded=True):
         model = st.selectbox("Propagation Model", MODEL_OPTIONS,
                              index=MODEL_OPTIONS.index("LongleyRice"))
+        if model == "LongleyRice":
+            DIFFRACTION_OPTIONS = {
+                "ITM (default)": "ITM",
+                "Knife-edge": "Knife-edge",
+                "Off (LOS)": "Off (LOS)",
+            }
+            diffraction_label = st.selectbox(
+                "Diffraction",
+                list(DIFFRACTION_OPTIONS.keys()),
+                index=0,
+                help="Penanganan terrain: ITM = difraksi penuh (default); "
+                     "Knife-edge = model pisau tunggal; Off (LOS) = tanpa difraksi "
+                     "(garis-pandang murni / hanya jarak).",
+            )
+            diffraction = DIFFRACTION_OPTIONS[diffraction_label]
+        else:
+            diffraction = "ITM"
 
     # ---- FORM ZONE: compute parameters (apply on RUN) ----
     with st.form("compute_form"):
@@ -298,6 +315,7 @@ with st.sidebar:
                         float(tx_power_dbm), int(itm_polarization),
                         float(coverage_threshold_dbm),
                         int(smoothing), soil_eps, soil_sgm, soil_klim,
+                        diffraction=diffraction,
                     )
                     runtime = time.time() - t0
                     cov_rgba = np.asarray(rgba)
@@ -325,6 +343,7 @@ with st.sidebar:
                             longley_rice_polarization=int(itm_polarization),
                             longley_rice_eps=soil_eps, longley_rice_sgm=soil_sgm,
                             longley_rice_klim=soil_klim,
+                            longley_rice_diffraction=diffraction,
                         )
                         path_loss = path_loss_fn(coverage_distance)
                     else:
@@ -406,7 +425,7 @@ if show_heatmap:
                 tx_power_dbm=float(tx_power_dbm), ipol=int(itm_polarization),
                 coverage_threshold_dbm=float(coverage_threshold_dbm),
                 smoothing=int(smoothing), eps=soil_eps, sgm=soil_sgm,
-                klim=soil_klim,
+                klim=soil_klim, diffraction=diffraction,
             )
     except RuntimeError as exc:
         st.error(f"{exc}")
@@ -492,6 +511,7 @@ if calc is not None:
     ]
     if model == "LongleyRice":
         rows += [
+            ("Diffraction", diffraction_label),
             ("TX Height", f"{tx_height:.1f} m"),
             ("RX Height", f"{rx_height:.1f} m"),
             ("Reliability", f"{itm_reliability:.0f} %"),

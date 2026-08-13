@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 
 from itm_adapter import run_longley_rice
@@ -106,7 +108,7 @@ def close_in_path_loss(frequency, distance, reference_distance=1):
 ### 6. Longley-Rice Propagation Model ###
 def longley_rice_path_loss(frequency, distance_km, tx_height, rx_height, profile_m,
                            ipol=0, reliability=50, confidence=50,
-                           eps=None, sgm=None, klim=None):
+                           eps=None, sgm=None, klim=None, diffraction="ITM"):
     """
     Longley-Rice (ITM) point-to-point path loss in dB via itmlogic.
 
@@ -125,8 +127,15 @@ def longley_rice_path_loss(frequency, distance_km, tx_height, rx_height, profile
     :param eps: Terrain relative permittivity (None -> p2p.py default)
     :param sgm: Terrain conductivity in S/m (None -> p2p.py default)
     :param klim: ITM climate zone (None -> p2p.py default)
+    :param diffraction: Terrain handling mode. "ITM" (default) runs the full
+        Longley-Rice engine; "Knife-edge" uses the single knife-edge diffraction
+        model; "Off (LOS)" returns pure free-space loss (no terrain diffraction).
     :return: Path loss in dB
     """
+    if diffraction == "Off (LOS)":
+        return free_space_path_loss(frequency, distance_km)
+    if diffraction == "Knife-edge":
+        return knife_edge_path_loss(frequency, distance_km, tx_height, rx_height, profile_m)
     env = {}
     if eps is not None:
         env["eps"] = eps
@@ -138,6 +147,53 @@ def longley_rice_path_loss(frequency, distance_km, tx_height, rx_height, profile
         frequency, tx_height, rx_height, profile_m, distance_km,
         ipol=ipol, reliability=reliability, confidence=confidence, **env,
     )
+
+
+### 6b. Knife-Edge Diffraction Propagation Model ###
+def knife_edge_path_loss(frequency, distance_km, tx_height, rx_height, profile_m):
+    """Single knife-edge diffraction path loss (dB).
+
+    Treats the highest terrain point above the TX->RX line-of-sight as a knife
+    edge and adds the classic Fresnel-Kirchhoff diffraction attenuation to the
+    free-space loss. When the path is clear (no obstacle above LOS) it evaluates
+    to free-space loss only, so it degrades gracefully to LOS.
+
+    :param frequency: Frequency in MHz
+    :param distance_km: Link distance in km
+    :param tx_height: Transmitter antenna height above ground (m)
+    :param rx_height: Receiver antenna height above ground (m)
+    :param profile_m: Ground elevation (m) sampled along the tx->rx path
+    :return: Path loss in dB
+    """
+    profile = [float(x) for x in profile_m]
+    if len(profile) < 2 or distance_km <= 0 or frequency <= 0:
+        return float(free_space_path_loss(frequency, distance_km))
+    lam = 299792458.0 / (float(frequency) * 1e6)          # wavelength (m)
+    h_tx = profile[0] + float(tx_height)
+    h_rx = profile[-1] + float(rx_height)
+    n = len(profile)
+    d_m = np.linspace(0.0, float(distance_km) * 1000.0, n)  # metres along path
+    los = np.full(n, h_tx) if d_m[-1] <= 0 else h_tx + (h_rx - h_tx) * (d_m / d_m[-1])
+    abs_h = np.array(profile, dtype=float)
+    abs_h[0] = h_tx
+    abs_h[-1] = h_rx
+    clearance = abs_h - los                                     # +ve = above LOS
+    interior = clearance[1:-1]
+    if interior.size == 0:
+        h_obs, d_obs = 0.0, d_m[-1] / 2.0
+    else:
+        k = int(np.argmax(interior))
+        h_obs = float(interior[k])
+        d_obs = float(d_m[1 + k])
+    fs = float(free_space_path_loss(frequency, distance_km))
+    if h_obs <= 0:
+        return fs
+    d1 = max(d_obs, 1.0)
+    d2 = max(d_m[-1] - d_obs, 1.0)
+    v = h_obs * math.sqrt(2.0 * (d1 + d2) / (lam * d1 * d2))
+    att = 6.9 + 20.0 * math.log10(math.sqrt((v - 0.1) ** 2 + 1.0) + v - 0.1)
+    return float(fs + att)
+
 
 ### 7. TIREM Propagation Model ###
 def tirem_path_loss(frequency, distance, terrain_type="average"):
@@ -180,7 +236,8 @@ def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="av
                  longley_rice_profile=None,
                  longley_rice_reliability=50.0, longley_rice_confidence=50.0,
                  longley_rice_polarization=0, longley_rice_eps=None,
-                 longley_rice_sgm=None, longley_rice_klim=None):
+                 longley_rice_sgm=None, longley_rice_klim=None,
+                 longley_rice_diffraction="ITM"):
     """Return a callable f(distance_km) -> path_loss_dB for the selected model.
 
     Model-specific params are passed explicitly so the result is deterministic
@@ -214,6 +271,7 @@ def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="av
                 confidence=longley_rice_confidence,
                 eps=longley_rice_eps, sgm=longley_rice_sgm,
                 klim=longley_rice_klim,
+                diffraction=longley_rice_diffraction,
             )
         return _lr
     if model == "TIREM":

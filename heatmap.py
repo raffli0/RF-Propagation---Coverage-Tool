@@ -205,9 +205,10 @@ def _spoke_points(lat0, lon0, bearing, range_km, n_radial):
 
 
 def _longley_rice_loss_grid_radial(location, range_km, freq, tx_height, rx_height,
-                                   reliability, confidence, ipol=0,
-                                   eps=None, sgm=None, klim=None,
-                                   n_spokes=180, n_radial=60, n_fine=400):
+                                    reliability, confidence, ipol=0,
+                                    eps=None, sgm=None, klim=None,
+                                    n_spokes=180, n_radial=60, n_fine=400,
+                                    diffraction="ITM"):
     """Radio-Mobile-style radial coverage engine (NOT one ITM call per cell).
 
     Builds a loss table loss[spoke, radial] by running ITM along a small number
@@ -240,7 +241,7 @@ def _longley_rice_loss_grid_radial(location, range_km, freq, tx_height, rx_heigh
             loss_table[b, k] = longley_rice_path_loss(
                 freq, r, tx_height, rx_height, profile,
                 ipol=ipol, reliability=reliability, confidence=confidence,
-                eps=eps, sgm=sgm, klim=klim,
+                eps=eps, sgm=sgm, klim=klim, diffraction=diffraction,
             )
     return loss_table, radial_dist
 
@@ -312,7 +313,8 @@ def compute_heatmap_assets(location, range_km, n, cmap_name, model, freq,
                            tx_power_dbm=TX_POWER_DBM_DEFAULT,
                            ipol=ITM_POLARIZATION_DEFAULT,
                            coverage_threshold_dbm=ITM_COVERAGE_THRESHOLD_DBM_DEFAULT,
-                           smoothing=0, eps=None, sgm=None, klim=None):
+                           smoothing=0, eps=None, sgm=None, klim=None,
+                           diffraction="ITM"):
     """Compute the path-loss raster (RGBA) and colorbar PNG for a grid.
 
     Cached by every parameter that affects the output so re-renders and area
@@ -339,6 +341,7 @@ def compute_heatmap_assets(location, range_km, n, cmap_name, model, freq,
             reliability, confidence, ipol=ipol,
             eps=eps, sgm=sgm, klim=klim,
             n_spokes=LR_SPOKES, n_radial=LR_RADIAL_STEPS,
+            diffraction=diffraction,
         )
         loss = _grid_loss_from_table(
             loss_table, radial_dist, lat_m, lon_m, dist, float(location[0]),
@@ -422,7 +425,7 @@ def render_heatmap(map_obj, location, range_km, n, cmap_name, opacity, model, fr
                    confidence=ITM_CONFIDENCE_DEFAULT,
                    tx_power_dbm=TX_POWER_DBM_DEFAULT, ipol=ITM_POLARIZATION_DEFAULT,
                    coverage_threshold_dbm=ITM_COVERAGE_THRESHOLD_DBM_DEFAULT,
-                   smoothing=0, eps=None, sgm=None, klim=None):
+                   smoothing=0, eps=None, sgm=None, klim=None, diffraction="ITM"):
     """Compute the raster (path loss or elevation) and add heatmap + colorbar."""
     if ring is not None and bounds is None:
         bounds = ring_bounds(ring)
@@ -446,7 +449,7 @@ def render_heatmap(map_obj, location, range_km, n, cmap_name, opacity, model, fr
             bounds_key, ring_key, float(tx_height), float(rx_height),
             float(reliability), float(confidence), float(tx_power_dbm),
             int(ipol), float(coverage_threshold_dbm),
-            int(smoothing), eps, sgm, klim,
+            int(smoothing), eps, sgm, klim, diffraction,
         )
     map_obj = add_coverage_raster(map_obj, rgba, out_bounds, opacity)
     map_obj = add_colorbar_overlay(map_obj, cbar, out_bounds)

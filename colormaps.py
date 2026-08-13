@@ -31,6 +31,40 @@ def colorize(loss, cmap_name, vmin, vmax):
     return rgba
 
 
+def smooth_upscale(rgba, factor=2):
+    """Upscale an RGBA raster with Lanczos interpolation.
+
+    Gives the Radio-Mobile-style smooth look: color transitions blend
+    instead of showing blocky grid pixels, and circular/terrain boundaries
+    get anti-aliased edges.
+    """
+    factor = max(int(factor), 1)
+    if factor == 1 or rgba.size == 0:
+        return rgba
+    img = Image.fromarray(rgba, mode="RGBA")
+    w, h = img.size
+    img = img.resize((w * factor, h * factor), Image.LANCZOS)
+    return np.asarray(img)
+
+
+def cap_overlay_size(rgba, max_side=1200):
+    """Downscale an RGBA raster so the folium base64 payload stays small.
+
+    folium encodes the overlay as a base64 PNG in the map HTML; an array much
+    larger than ~1200 px grows the payload into many MB and st_folium stops
+    rendering it (the coverage silently disappears). Lanczos downscale keeps
+    the result smooth while bounding the payload.
+    """
+    h, w = rgba.shape[:2]
+    if max(h, w) <= max_side:
+        return rgba
+    scale = max_side / float(max(h, w))
+    img = Image.fromarray(rgba, mode="RGBA")
+    img = img.resize((max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                     Image.LANCZOS)
+    return np.asarray(img)
+
+
 def nice_limits(vmin, vmax):
     """Round to a clean 10 dB range for the colorbar scale."""
     lo = float(np.floor(vmin / 10.0) * 10.0)

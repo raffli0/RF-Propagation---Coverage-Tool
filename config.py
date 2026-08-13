@@ -22,6 +22,10 @@ COLORMAPS = {
         (217, 239, 139), (254, 224, 139), (253, 174, 97), (244, 109, 67),
         (215, 48, 39), (165, 0, 38),
     ],
+    "RadioMobile": [
+        (46, 204, 113), (126, 217, 111), (193, 228, 107), (241, 196, 15),
+        (243, 156, 18), (230, 126, 34), (231, 76, 60), (192, 57, 43),
+    ],
 }
 
 DEFAULT_CITIES = {
@@ -37,3 +41,28 @@ ENVIRONMENTS = ["urban", "rural"]
 # Target physical grid cell size (meters) for drawn-area heatmaps, so buildings
 # and small hills stay visible (~50-70 m) regardless of the selected area size.
 GRID_TARGET_CELL_M = 60
+
+# Longley-Rice (ITM) defaults: antenna heights, per-cell profile sampling, and a
+# safety cap on the number of grid cells (each cell runs its own ITM p2p call).
+# Benchmark: ~0.19 ms/cell, so the cap allows up to 500x500 (250000 cells,
+# ~47 s one-time; 350x350 ~23 s; 300x300 ~18 s). After the first run results
+# are served from st.cache_data.
+TX_HEIGHT_DEFAULT = 30.0
+RX_HEIGHT_DEFAULT = 1.5
+ITM_PROFILE_POINTS = 50
+MAX_ITM_GRID_CELLS = 250000
+# ITM uncertainty knobs (percent): reliability (signal availability) and
+# confidence (deviation of the actual environment from the model).
+ITM_RELIABILITY_DEFAULT = 50.0
+ITM_CONFIDENCE_DEFAULT = 50.0
+# Radio-Mobile-style signal display: effective radiated power used to turn
+# path loss (dB) into received signal (dBm), the RX sensitivity below which
+# coverage cells are hidden, and the default polarization (0=horizontal).
+TX_POWER_DBM_DEFAULT = 50.0
+ITM_COVERAGE_THRESHOLD_DBM_DEFAULT = -90.0
+ITM_POLARIZATION_DEFAULT = 0
+# Cap on the raster side (px) embedded in the folium map as a base64 PNG.
+# Above ~1200 px the HTML payload grows into many MB and st_folium fails or
+# becomes unresponsive, so the coverage "disappears" from the map. The real
+# ITM detail comes from the compute grid; this only bounds the display size.
+MAX_OVERLAY_SIDE = 1200

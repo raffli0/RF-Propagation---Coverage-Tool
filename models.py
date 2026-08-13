@@ -1,5 +1,7 @@
 import numpy as np
 
+from itm_adapter import run_longley_rice
+
 # ---------------------------------------------------------------------------
 # ITU-R P.838-3 rain attenuation coefficients (k, alpha) vs frequency (GHz).
 # Interpolated in log-frequency; gamma_R = k * R^alpha (dB/km).
@@ -102,21 +104,29 @@ def close_in_path_loss(frequency, distance, reference_distance=1):
     return close_in_loss
 
 ### 6. Longley-Rice Propagation Model ###
-def longley_rice_path_loss(frequency, distance, terrain_type="average"):
+def longley_rice_path_loss(frequency, distance_km, tx_height, rx_height, profile_m,
+                           ipol=0, reliability=50, confidence=50):
     """
-    Estimate the Longley-Rice path loss.
-    
+    Longley-Rice (ITM) point-to-point path loss in dB via itmlogic.
+
+    Delegates to :func:`itm_adapter.run_longley_rice`, which translates these
+    inputs into itmlogic's ``prop`` structure. The ITM algorithm itself lives
+    in the installed ``itmlogic`` package and is never modified here.
+
     :param frequency: Frequency in MHz
-    :param distance: Distance in km
-    :param terrain_type: Terrain type (default is "average")
+    :param distance_km: Link distance in km
+    :param tx_height: Transmitter antenna height above ground (m)
+    :param rx_height: Receiver antenna height above ground (m)
+    :param profile_m: Ground elevation (m) sampled along the tx->rx path
+    :param ipol: Polarization (0=horizontal, 1=vertical)
+    :param reliability: Reliability level in percent
+    :param confidence: Confidence level in percent
     :return: Path loss in dB
     """
-    # Placeholder model - real Longley-Rice is much more complex
-    terrain_factor = {"average": 0.5, "hilly": 1.0, "mountainous": 2.0}
-    factor = terrain_factor.get(terrain_type, 0.5)
-    distance = np.maximum(distance, 1e-9)
-    longley_rice_loss = factor * (20 * np.log10(frequency) + 20 * np.log10(distance) + 32.45)
-    return longley_rice_loss
+    return run_longley_rice(
+        frequency, tx_height, rx_height, profile_m, distance_km,
+        ipol=ipol, reliability=reliability, confidence=confidence,
+    )
 
 ### 7. TIREM Propagation Model ###
 def tirem_path_loss(frequency, distance, terrain_type="average"):
@@ -154,11 +164,19 @@ def ray_tracing_path_loss(frequency, distance, environment="urban"):
 
 
 ### Model dispatch ###
-def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="average", environment="urban"):
+def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="average",
+                 environment="urban", tx_height=30.0, rx_height=1.5,
+                 longley_rice_profile=None,
+                 longley_rice_reliability=50.0, longley_rice_confidence=50.0,
+                 longley_rice_polarization=0):
     """Return a callable f(distance_km) -> path_loss_dB for the selected model.
 
     Model-specific params are passed explicitly so the result is deterministic
     and safe to cache (scalable when grids grow large).
+
+    LongleyRice is point-to-point and needs a terrain profile along the path:
+    pass one via `longley_rice_profile` (list of elevation samples in meters),
+    or the returned callable raises RuntimeError when invoked.
     """
     if model == "Free Space":
         return lambda d: free_space_path_loss(freq, d)
@@ -171,7 +189,19 @@ def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="av
     if model == "CloseIn":
         return lambda d: close_in_path_loss(freq, d)
     if model == "LongleyRice":
-        return lambda d: longley_rice_path_loss(freq, d, terrain_type)
+        def _lr(d):
+            if longley_rice_profile is None:
+                raise RuntimeError(
+                    "LongleyRice memerlukan terrain profile. "
+                    "Gunakan terrain_profile() / render_heatmap per-cell."
+                )
+            return longley_rice_path_loss(
+                freq, d, tx_height, rx_height, longley_rice_profile,
+                ipol=longley_rice_polarization,
+                reliability=longley_rice_reliability,
+                confidence=longley_rice_confidence,
+            )
+        return _lr
     if model == "TIREM":
         return lambda d: tirem_path_loss(freq, d, terrain_type)
     return lambda d: ray_tracing_path_loss(freq, d, environment)

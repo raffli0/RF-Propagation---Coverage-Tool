@@ -44,13 +44,13 @@ GRID_TARGET_CELL_M = 60
 
 # Longley-Rice (ITM) defaults: antenna heights, per-cell profile sampling, and a
 # safety cap on the number of grid cells (each cell runs its own ITM p2p call).
-# Benchmark: ~0.19 ms/cell, so the cap allows up to 500x500 (250000 cells,
-# ~47 s one-time; 350x350 ~23 s; 300x300 ~18 s). After the first run results
-# are served from st.cache_data.
+# Benchmark: ~0.19 ms/cell, so the cap allows up to 700x700 (490000 cells,
+# ~90 s one-time; 500x500 ~47 s; 450x450 ~40 s; 350x350 ~23 s). After the first
+# run results are served from st.cache_data.
 TX_HEIGHT_DEFAULT = 30.0
 RX_HEIGHT_DEFAULT = 1.5
 ITM_PROFILE_POINTS = 50
-MAX_ITM_GRID_CELLS = 250000
+MAX_ITM_GRID_CELLS = 490000
 # ITM uncertainty knobs (percent): reliability (signal availability) and
 # confidence (deviation of the actual environment from the model).
 ITM_RELIABILITY_DEFAULT = 50.0
@@ -66,3 +66,35 @@ ITM_POLARIZATION_DEFAULT = 0
 # becomes unresponsive, so the coverage "disappears" from the map. The real
 # ITM detail comes from the compute grid; this only bounds the display size.
 MAX_OVERLAY_SIDE = 1200
+
+# Earth-surface & climate parameters forwarded to ITM (itmlogic prop): eps =
+# relative permittivity, sgm = conductivity (S/m) for the soil; klim = ITM
+# climate zone. Tightening these keeps the attenuation continuous between
+# neighbouring pixels instead of jumping coarsely.
+SOIL_TYPES = {
+    "Average ground": (15.0, 0.005),
+    "Poor ground": (4.0, 0.001),
+    "Good ground": (25.0, 0.020),
+    "Fresh water": (81.0, 0.010),
+    "Sea water": (81.0, 5.000),
+}
+CLIMATE_ZONES = {
+    "Equatorial": 1,
+    "Continental subtropical": 2,
+    "Maritime subtropical": 3,
+    "Desert": 4,
+    "Continental temperate": 5,
+    "Maritime temperate (overland)": 6,
+    "Maritime temperate (over-sea)": 7,
+}
+SOIL_TYPE_DEFAULT = "Average ground"
+CLIMATE_ZONE_DEFAULT = "Continental temperate"
+
+
+# Radio-Mobile-style radial engine: ITM is run along `LR_SPOKES` bearings out to
+# `LR_RADIAL_STEPS` distance samples (not once per grid cell). Cost ~
+# LR_SPOKES * LR_RADIAL_STEPS calls (~5700 -> ~3 s one-time, then served from
+# st.cache_data) instead of n_cells^2, while still producing terrain-following
+# shadow sectors. Lower = faster/coarser; 144 spokes = 2.5 deg resolution.
+LR_SPOKES = 144
+LR_RADIAL_STEPS = 40

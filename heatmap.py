@@ -4,6 +4,8 @@ Grids are computed once and cached per unique combination of inputs so slider
 moves and area re-selections reuse work instead of recomputing.
 """
 
+import math
+
 import numpy as np
 import streamlit as st
 
@@ -11,7 +13,8 @@ from colormaps import (cap_overlay_size, colorize, nice_limits, colorbar_image,
                        smooth_upscale)
 from config import (GRID_TARGET_CELL_M, ITM_CONFIDENCE_DEFAULT,
                     ITM_COVERAGE_THRESHOLD_DBM_DEFAULT, ITM_POLARIZATION_DEFAULT,
-                    ITM_PROFILE_POINTS, ITM_RELIABILITY_DEFAULT, MAX_ITM_GRID_CELLS,
+                    ITM_PROFILE_POINTS, ITM_RELIABILITY_DEFAULT, LR_RADIAL_STEPS,
+                    LR_SPOKES, MAX_ITM_GRID_CELLS,
                     MAX_OVERLAY_SIDE, RX_HEIGHT_DEFAULT, TX_HEIGHT_DEFAULT,
                     TX_POWER_DBM_DEFAULT)
 from elevation import sample_elevation
@@ -152,8 +155,124 @@ def _longley_rice_path_points(lat0, lon0, lat_m, lon_m, n_points):
     return lats.T, lons.T                                            # (N, K)
 
 
+def _smooth_field(field, level):
+    """Optional Gaussian blur on a 2-D float field (0=off, 1=light, 2=strong).
+
+    Applied to the raw loss / received-signal field *before* colouring and the
+    coverage threshold so neighbouring pixels blend into a continuous gradient
+    instead of stepping in blocky colour bands. Pure-numpy separable blur keeps
+    the computation float-exact (no PIL mode conversion).
+    """
+    if not level:
+        return field
+    sigma = {1: 1.2, 2: 3.0}.get(int(level), 0.0)
+    if sigma <= 0:
+        return field
+    f = np.asarray(field, dtype=np.float64)
+    radius = int(round(3.0 * sigma))
+    x = np.arange(-radius, radius + 1, dtype=float)
+    kernel = np.exp(-(x ** 2) / (2.0 * sigma ** 2))
+    kernel /= kernel.sum()
+    f = np.pad(f, ((radius, radius), (radius, radius)), mode="edge")
+    for axis in (0, 1):
+        f = np.apply_along_axis(
+            lambda m: np.convolve(m, kernel, mode="same"), axis=axis, arr=f
+        )
+    return f[radius:-radius, radius:-radius].astype(np.float32)
+
+
+def _spoke_points(lat0, lon0, bearing, range_km, n_radial):
+    """(n_radial,) lat/lon samples along one great-circle bearing from TX.
+
+    Parametrised by arc-length fraction `f`, so sample k sits at distance
+    f_k * range_km. Elevation sampled once per spoke is then reused for the
+    ITM profiles of every radial sample on that bearing.
+    """
+    lat0r = math.radians(lat0)
+    lon0r = math.radians(lon0)
+    angd = range_km / 6371.0
+    lat_e = math.asin(math.sin(lat0r) * math.cos(angd)
+                      + math.cos(lat0r) * math.sin(angd) * math.cos(bearing))
+    lon_e = lon0r + math.atan2(math.sin(bearing) * math.sin(angd) * math.cos(lat0r),
+                               math.cos(angd) - math.sin(lat0r) * math.sin(lat_e))
+    f = np.linspace(0.0, 1.0, n_radial)
+    a = np.sin((1.0 - f) * angd) / math.sin(angd)
+    bb = np.sin(f * angd) / math.sin(angd)
+    x = a * math.cos(lat0r) * math.cos(lon0r) + bb * math.cos(lat_e) * math.cos(lon_e)
+    y = a * math.cos(lat0r) * math.sin(lon0r) + bb * math.cos(lat_e) * math.sin(lon_e)
+    z = a * math.sin(lat0r) + bb * math.sin(lat_e)
+    return np.degrees(np.arcsin(z)), np.degrees(np.arctan2(y, x))
+
+
+def _longley_rice_loss_grid_radial(location, range_km, freq, tx_height, rx_height,
+                                   reliability, confidence, ipol=0,
+                                   eps=None, sgm=None, klim=None,
+                                   n_spokes=180, n_radial=60, n_fine=400):
+    """Radio-Mobile-style radial coverage engine (NOT one ITM call per cell).
+
+    Builds a loss table loss[spoke, radial] by running ITM along a small number
+    of radial bearings out to `range_km`. Elevation is sampled once along every
+    spoke (vectorized), then each display cell's loss is interpolated from the
+    two nearest bearings and two nearest radial samples. Cost is ~n_spokes *
+    n_radial ITM calls (≈10k) instead of n_cells^2 (≈200k+), i.e. 50-200x
+    faster, while still producing terrain-following shadow zones like Radio
+    Mobile / SPLAT.
+    """
+    lat0, lon0 = location
+    spoke_lat = np.empty((n_spokes, n_fine))
+    spoke_lon = np.empty((n_spokes, n_fine))
+    for b in range(n_spokes):
+        br = 2.0 * math.pi * b / n_spokes
+        sl, so = _spoke_points(lat0, lon0, br, range_km, n_fine)
+        spoke_lat[b] = sl
+        spoke_lon[b] = so
+    elev = sample_elevation(spoke_lat, spoke_lon)
+    elev = np.nan_to_num(elev, nan=0.0)
+
+    radial_dist = np.linspace(range_km / n_radial, range_km, n_radial)
+    loss_table = np.empty((n_spokes, n_radial), dtype=float)
+    for b in range(n_spokes):
+        full = elev[b]
+        for k in range(n_radial):
+            r = float(radial_dist[k])
+            n_pts = max(2, int(round((r / range_km) * n_fine)))
+            profile = full[:n_pts].tolist()
+            loss_table[b, k] = longley_rice_path_loss(
+                freq, r, tx_height, rx_height, profile,
+                ipol=ipol, reliability=reliability, confidence=confidence,
+                eps=eps, sgm=sgm, klim=klim,
+            )
+    return loss_table, radial_dist
+
+
+def _grid_loss_from_table(loss_table, radial_dist, lat_m, lon_m, dist, lat0, lon0):
+    """Interpolate the radial loss table onto an n x n display grid (vectorized)."""
+    n_spokes, n_radial = loss_table.shape
+    dlat = lat_m - lat0
+    dlon = (lon_m - lon0) * np.cos(np.radians(lat0))
+    bearing = (np.arctan2(dlon, dlat) + 2.0 * np.pi) % (2.0 * np.pi)
+    r = np.clip(dist, radial_dist[0], radial_dist[-1])
+
+    f_rad = ((r - radial_dist[0]) / (radial_dist[-1] - radial_dist[0])
+             * (n_radial - 1))
+    r0 = np.floor(f_rad).astype(int)
+    r1 = np.clip(r0 + 1, 0, n_radial - 1)
+    tr = f_rad - r0
+
+    f_sp = bearing / (2.0 * np.pi) * n_spokes
+    b0 = np.floor(f_sp).astype(int) % n_spokes
+    b1 = (b0 + 1) % n_spokes
+    tb = f_sp - np.floor(f_sp)
+
+    v00 = loss_table[b0, r0]; v01 = loss_table[b0, r1]
+    v10 = loss_table[b1, r0]; v11 = loss_table[b1, r1]
+    return ((1.0 - tb) * ((1.0 - tr) * v00 + tr * v01)
+            + tb * ((1.0 - tr) * v10 + tr * v11))
+
+
 def _longley_rice_loss_grid(location, lat_m, lon_m, dist, bounds, freq, tx_height,
-                            rx_height, reliability, confidence, ipol=0):
+                            rx_height, reliability, confidence, ipol=0,
+                            eps=None, sgm=None, klim=None):
     """Path-loss raster for LongleyRice: one ITM p2p call per grid cell.
 
     Each cell gets its own SRTM terrain profile (sampled once for the whole
@@ -178,6 +297,7 @@ def _longley_rice_loss_grid(location, lat_m, lon_m, dist, bounds, freq, tx_heigh
         loss[i] = longley_rice_path_loss(
             freq, dist_c[i], tx_height, rx_height, elev[i].tolist(),
             ipol=ipol, reliability=reliability, confidence=confidence,
+            eps=eps, sgm=sgm, klim=klim,
         )
     return loss.reshape(lat_m.shape)
 
@@ -191,7 +311,8 @@ def compute_heatmap_assets(location, range_km, n, cmap_name, model, freq,
                            confidence=ITM_CONFIDENCE_DEFAULT,
                            tx_power_dbm=TX_POWER_DBM_DEFAULT,
                            ipol=ITM_POLARIZATION_DEFAULT,
-                           coverage_threshold_dbm=ITM_COVERAGE_THRESHOLD_DBM_DEFAULT):
+                           coverage_threshold_dbm=ITM_COVERAGE_THRESHOLD_DBM_DEFAULT,
+                           smoothing=0, eps=None, sgm=None, klim=None):
     """Compute the path-loss raster (RGBA) and colorbar PNG for a grid.
 
     Cached by every parameter that affects the output so re-renders and area
@@ -208,34 +329,61 @@ def compute_heatmap_assets(location, range_km, n, cmap_name, model, freq,
     """
     lat_m, lon_m, dist, out_bounds = coverage_grid(location, range_km, n, bounds=bounds)
     if model == "LongleyRice":
-        loss = _longley_rice_loss_grid(
-            location, lat_m, lon_m, dist, out_bounds, freq, tx_height, rx_height,
+        # Radial engine out to `range_km` (the Distance/study-radius). The raster
+        # is subsequently clipped to that same circle (see below) so the square
+        # grid corners are never shown and the study area stays circular like
+        # Radio Mobile, while the coverage *inside* follows terrain.
+        radial_extent = float(range_km)
+        loss_table, radial_dist = _longley_rice_loss_grid_radial(
+            location, radial_extent, freq, tx_height, rx_height,
             reliability, confidence, ipol=ipol,
+            eps=eps, sgm=sgm, klim=klim,
+            n_spokes=LR_SPOKES, n_radial=LR_RADIAL_STEPS,
+        )
+        loss = _grid_loss_from_table(
+            loss_table, radial_dist, lat_m, lon_m, dist, float(location[0]),
+            float(location[1]),
         )
         rx_dbm = float(tx_power_dbm) - loss
-        # LR coverage uses a fixed signal scale. The coverage threshold, not
-        # the radial distance, defines the visible propagation footprint.
-        vmin = float(coverage_threshold_dbm) - 20.0
-        vmax = float(tx_power_dbm)
-        if vmax <= vmin:
-            vmax = vmin + 1.0
+        if smoothing:
+            rx_dbm = _smooth_field(rx_dbm, smoothing)
+        # Adaptive Radio-Mobile-style scale: the coverage edge (Rx == threshold)
+        # maps to the bottom colour and the strongest covered signal maps to the
+        # top (red) colour, so the full colormap (including red) is always used
+        # regardless of TX power / threshold. vmin is pinned to the threshold
+        # (rounded to 10) so the gradient is stable between runs.
+        th = float(coverage_threshold_dbm)
+        covered = rx_dbm >= th
+        if covered.any():
+            vmin = float(np.floor(th / 10.0) * 10.0)
+            p95 = float(np.percentile(rx_dbm[covered], 95))
+            vmax = max(float(np.ceil(p95 / 10.0) * 10.0), vmin + 30.0)
+        else:
+            vmin = th - 1.0
+            vmax = th + 1.0
         rgba = colorize(rx_dbm, cmap_name, vmin, vmax)
     else:
         path_loss_fn = get_model_fn(model, freq, rain_rate, fog_density, terrain_type, environment)
         loss = path_loss_fn(dist)
+        if smoothing:
+            loss = _smooth_field(loss, smoothing)
         vmin, vmax = nice_limits(float(np.min(loss)), float(np.max(loss)))
         rgba = colorize(loss, cmap_name, vmin, vmax)
 
     if model == "LongleyRice":
-        # Coverage is threshold-driven, NOT clipped to a circle or square:
-        # a cell is covered when Rx >= RX sensitivity, so the footprint spreads
-        # radially from the TX and hills/valleys leave uncovered shadow zones
-        # (exactly like Radio Mobile / SPLAT / CloudRF). A drawn polygon is
-        # still respected as an explicit user boundary.
+        # Coverage is threshold-driven (Rx >= RX sensitivity) so the footprint
+        # spreads radially from the TX and hills/valleys leave uncovered shadow
+        # zones (exactly like Radio Mobile / SPLAT / CloudRF). The raster is then
+        # clipped to the study-area circle (radius = Distance) so the square grid
+        # corners never appear; within that circle the boundary is terrain-shaped,
+        # not a flat disk. A drawn polygon is still respected as an explicit
+        # user boundary (it overrides the circle).
         if ring is not None:
             mask = polygon_mask(lat_m, lon_m, ring)
             if mask is not None:
                 rgba[..., 3][~mask] = 0
+        else:
+            rgba[..., 3][np.asarray(dist) > float(range_km)] = 0
         rgba[..., 3][rx_dbm < float(coverage_threshold_dbm)] = 0
     else:
         rgba = apply_contour_mask(rgba, lat_m, lon_m, dist, range_km, ring)
@@ -273,7 +421,8 @@ def render_heatmap(map_obj, location, range_km, n, cmap_name, opacity, model, fr
                    reliability=ITM_RELIABILITY_DEFAULT,
                    confidence=ITM_CONFIDENCE_DEFAULT,
                    tx_power_dbm=TX_POWER_DBM_DEFAULT, ipol=ITM_POLARIZATION_DEFAULT,
-                   coverage_threshold_dbm=ITM_COVERAGE_THRESHOLD_DBM_DEFAULT):
+                   coverage_threshold_dbm=ITM_COVERAGE_THRESHOLD_DBM_DEFAULT,
+                   smoothing=0, eps=None, sgm=None, klim=None):
     """Compute the raster (path loss or elevation) and add heatmap + colorbar."""
     if ring is not None and bounds is None:
         bounds = ring_bounds(ring)
@@ -297,6 +446,7 @@ def render_heatmap(map_obj, location, range_km, n, cmap_name, opacity, model, fr
             bounds_key, ring_key, float(tx_height), float(rx_height),
             float(reliability), float(confidence), float(tx_power_dbm),
             int(ipol), float(coverage_threshold_dbm),
+            int(smoothing), eps, sgm, klim,
         )
     map_obj = add_coverage_raster(map_obj, rgba, out_bounds, opacity)
     map_obj = add_colorbar_overlay(map_obj, cbar, out_bounds)

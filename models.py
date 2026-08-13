@@ -105,7 +105,8 @@ def close_in_path_loss(frequency, distance, reference_distance=1):
 
 ### 6. Longley-Rice Propagation Model ###
 def longley_rice_path_loss(frequency, distance_km, tx_height, rx_height, profile_m,
-                           ipol=0, reliability=50, confidence=50):
+                           ipol=0, reliability=50, confidence=50,
+                           eps=None, sgm=None, klim=None):
     """
     Longley-Rice (ITM) point-to-point path loss in dB via itmlogic.
 
@@ -121,11 +122,21 @@ def longley_rice_path_loss(frequency, distance_km, tx_height, rx_height, profile
     :param ipol: Polarization (0=horizontal, 1=vertical)
     :param reliability: Reliability level in percent
     :param confidence: Confidence level in percent
+    :param eps: Terrain relative permittivity (None -> p2p.py default)
+    :param sgm: Terrain conductivity in S/m (None -> p2p.py default)
+    :param klim: ITM climate zone (None -> p2p.py default)
     :return: Path loss in dB
     """
+    env = {}
+    if eps is not None:
+        env["eps"] = eps
+    if sgm is not None:
+        env["sgm"] = sgm
+    if klim is not None:
+        env["klim"] = klim
     return run_longley_rice(
         frequency, tx_height, rx_height, profile_m, distance_km,
-        ipol=ipol, reliability=reliability, confidence=confidence,
+        ipol=ipol, reliability=reliability, confidence=confidence, **env,
     )
 
 ### 7. TIREM Propagation Model ###
@@ -168,7 +179,8 @@ def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="av
                  environment="urban", tx_height=30.0, rx_height=1.5,
                  longley_rice_profile=None,
                  longley_rice_reliability=50.0, longley_rice_confidence=50.0,
-                 longley_rice_polarization=0):
+                 longley_rice_polarization=0, longley_rice_eps=None,
+                 longley_rice_sgm=None, longley_rice_klim=None):
     """Return a callable f(distance_km) -> path_loss_dB for the selected model.
 
     Model-specific params are passed explicitly so the result is deterministic
@@ -200,6 +212,8 @@ def get_model_fn(model, freq, rain_rate=None, fog_density=None, terrain_type="av
                 ipol=longley_rice_polarization,
                 reliability=longley_rice_reliability,
                 confidence=longley_rice_confidence,
+                eps=longley_rice_eps, sgm=longley_rice_sgm,
+                klim=longley_rice_klim,
             )
         return _lr
     if model == "TIREM":

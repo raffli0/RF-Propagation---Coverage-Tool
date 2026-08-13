@@ -6,45 +6,6 @@ from folium.plugins import Draw
 from folium.raster_layers import ImageOverlay
 
 
-def terrain_risk_score(altitude, distance):
-    """Heuristic risk score in [0, 1] from site altitude and link distance."""
-    return min(1.0, (altitude / 500) + max(0, (distance - 12) / 40))
-
-
-def add_signal_legend(m, vmax=-20, vmin=-112, label="Signal [dBm]"):
-    """Fixed vertical signal-level indicator anchored to the right edge of the map."""
-    ticks = [-20, -40, -60, -80, -100, -112]
-    labels = "".join(
-        f'<span style="text-align:right;">{tick}</span>' for tick in ticks
-    )
-    legend_html = f"""
-    <div style="
-        position: fixed;
-        right: 14px;
-        top: 50%;
-        transform: translateY(-50%);
-        z-index: 9999;
-        background: rgba(255,255,255,0.92);
-        border: 1px solid rgba(0,0,0,0.25);
-        border-radius: 4px;
-        padding: 8px;
-        font-size: 11px;
-        color: #1f1f1f;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.14);
-    ">
-        <div style="font-weight: 700; text-align: center; margin-bottom: 6px; letter-spacing: 0.03em;">{label}</div>
-        <div style="display: flex; align-items: stretch;">
-            <div style="width: 16px; height: 220px; background: linear-gradient(to bottom, #2ecc71, #f1c40f, #f39c12, #e74c3c); border: 1px solid rgba(0,0,0,0.18); border-radius: 2px;"></div>
-            <div style="display: flex; flex-direction: column; justify-content: space-between; margin-left: 6px; font-size: 10px; height: 220px;">
-                {labels}
-            </div>
-        </div>
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(legend_html))
-    return m
-
-
 def create_map(location, map_style="OpenStreetMap", add_draw=False, max_zoom=19):
     m = folium.Map(location=location, zoom_start=13, control_scale=True, max_zoom=max_zoom)
 
@@ -94,8 +55,6 @@ def create_map(location, map_style="OpenStreetMap", add_draw=False, max_zoom=19)
             overlay=False,
         ).add_to(m)
 
-    m = add_signal_legend(m)
-
     folium.LayerControl().add_to(m)
     if add_draw:
         Draw(
@@ -134,32 +93,6 @@ def remove_folium_circle(map_obj):
         child = map_obj._children.get(child_id)
         if isinstance(child, folium.Circle):
             del map_obj._children[child_id]
-    return map_obj
-
-
-def terrain_obstruction_indicator(map_obj, location, altitude, distance):
-    risk_score = terrain_risk_score(altitude, distance)
-    if risk_score < 0.35:
-        return map_obj
-
-    obstruction_radius = max(500, distance * 800)
-    folium.Circle(
-        location=location,
-        radius=obstruction_radius,
-        color='red',
-        weight=2,
-        fill=True,
-        fill_color='red',
-        fill_opacity=0.12,
-        popup='Terrain obstruction risk area'
-    ).add_to(map_obj)
-
-    folium.Marker(
-        location=[location[0] + 0.02, location[1] + 0.02],
-        icon=folium.DivIcon(
-            html='''<div style="background: rgba(255,255,255,0.9); border: 1px solid #cc3d3d; color: #b22222; font-weight: 700; font-size: 10px; padding: 3px 6px; border-radius: 6px;">Terrain Blocked</div>'''
-        )
-    ).add_to(map_obj)
     return map_obj
 
 
@@ -217,6 +150,35 @@ def add_selection_polygon(map_obj, ring):
         fill_opacity=0.12,
         popup="Coverage area selection",
     ).add_to(map_obj)
+    return map_obj
+
+
+def add_tx_marker(map_obj, location, label="TX"):
+    """Drop a small transmitter marker at the site location."""
+    folium.CircleMarker(
+        location=location,
+        radius=6,
+        color="#ffd166",
+        weight=2,
+        fill=True,
+        fill_color="#ffd166",
+        fill_opacity=1.0,
+        popup=label,
+        tooltip=label,
+    ).add_to(map_obj)
+    return map_obj
+
+
+def add_location_readout(map_obj, location, mode_text=""):
+    """Pin a small coordinate/readout chip to the bottom-left of the map."""
+    lat, lon = location
+    text = f"TX: {lat:.5f}, {lon:.5f}"
+    if mode_text:
+        text += f" &nbsp;|&nbsp; {mode_text}"
+    html = f"""
+        <div class="rf-map-readout">{text}</div>
+    """
+    map_obj.get_root().html.add_child(folium.Element(html))
     return map_obj
 
 

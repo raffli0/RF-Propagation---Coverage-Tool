@@ -11,6 +11,7 @@ Legacy fallback: the Open-Meteo elevation API (kept for reference/emergency).
 import os
 import shutil
 import time
+import concurrent.futures
 from math import log, tan
 
 import numpy as np
@@ -22,7 +23,11 @@ except ImportError:  # pragma: no cover
     rasterio = None
 
 SRTM_BASE_URL = "https://s3.amazonaws.com/elevation-tiles-prod/geotiff/{z}/{x}/{y}.tif"
-SRTM_ZOOM = 12
+# Zoom 13 ~= 1 arc-second (SRTM1, ~30 m/pixel) so terrain undulations feeding
+# the Longley-Rice engine are not coarse/blocky. Zoom 12 (3 arc-second) is the
+# old fallback; tiles are downloaded once and cached, so this only costs the
+# first fetch.
+SRTM_ZOOM = 13
 SRTM_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "rf_propagation", "srtm")
 TIMEOUT_SECONDS = 60
 
@@ -64,36 +69,48 @@ def _tile_path(x, y, zoom):
     return os.path.join(SRTM_CACHE_DIR, str(zoom), str(x), f"{y}.tif")
 
 
-def ensure_tiles(tiles, zoom=SRTM_ZOOM):
-    """Download any missing tiles once; return {tile: path or None}.
+def _ensure_one(tile, zoom, timeout):
+    """Download a single SRTM tile (or reuse the cached copy / 404 sentinel)."""
+    x, y = tile
+    path = _tile_path(x, y, zoom)
+    if os.path.exists(path):
+        return path if os.path.getsize(path) > 0 else None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    url = SRTM_BASE_URL.format(z=zoom, x=x, y=y)
+    tmp = path + ".part"
+    try:
+        with requests.get(url, stream=True, timeout=timeout) as resp:
+            if resp.status_code == 404:
+                open(path, "wb").close()
+                return None
+            resp.raise_for_status()
+            with open(tmp, "wb") as fh:
+                shutil.copyfileobj(resp.raw, fh)
+        os.replace(tmp, path)
+        return path
+    except requests.RequestException as exc:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise RuntimeError(f"Gagal mengunduh tile SRTM {zoom}/{x}/{y}: {exc}") from exc
+
+
+def ensure_tiles(tiles, zoom=SRTM_ZOOM, max_workers=8):
+    """Download any missing tiles (in parallel) once; return {tile: path or None}.
 
     None means "no data" (e.g. an ocean tile that does not exist upstream); an
     empty file is used as the on-disk sentinel so we never re-request it.
+    Parallel fetches (ThreadPoolExecutor) cut the first-run download time; each
+    tile has a unique ``*.part`` so there is no cross-tile race.
     """
     result = {}
-    for x, y in tiles:
-        path = _tile_path(x, y, zoom)
-        if os.path.exists(path):
-            result[(x, y)] = path if os.path.getsize(path) > 0 else None
-            continue
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        url = SRTM_BASE_URL.format(z=zoom, x=x, y=y)
-        tmp = path + ".part"
-        try:
-            with requests.get(url, stream=True, timeout=TIMEOUT_SECONDS) as resp:
-                if resp.status_code == 404:
-                    open(path, "wb").close()
-                    result[(x, y)] = None
-                    continue
-                resp.raise_for_status()
-                with open(tmp, "wb") as fh:
-                    shutil.copyfileobj(resp.raw, fh)
-            os.replace(tmp, path)
-            result[(x, y)] = path
-        except requests.RequestException as exc:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            raise RuntimeError(f"Gagal mengunduh tile SRTM {zoom}/{x}/{y}: {exc}") from exc
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_ensure_one, t, zoom, TIMEOUT_SECONDS): t for t in tiles}
+        for fut in concurrent.futures.as_completed(futures):
+            t = futures[fut]
+            try:
+                result[t] = fut.result()
+            except RuntimeError:
+                raise
     return result
 
 
@@ -105,6 +122,29 @@ def _mercator(lons, lats):
     x = lons * k / 180.0
     y = np.log(np.tan((90.0 + lats) * np.pi / 360.0)) * k / np.pi
     return x, y
+
+
+def sample_point_elevation(lat, lon):
+    """Ground elevation (m) at a single coordinate from cached SRTM tiles.
+
+    Returns NaN when the tile is missing/unavailable (e.g. first run before
+    the offline tile download, or open ocean). Slightly widens the lookup
+    window so the bilinear sampler has a 2x2 pixel footprint.
+    """
+    lat = float(lat)
+    lon = float(lon)
+    lat_m = np.array([[lat - 1e-4, lat, lat + 1e-4],
+                      [lat - 1e-4, lat, lat + 1e-4],
+                      [lat - 1e-4, lat, lat + 1e-4]])
+    lon_m = np.array([[lon - 1e-4, lon, lon + 1e-4],
+                      [lon - 1e-4, lon, lon + 1e-4],
+                      [lon - 1e-4, lon, lon + 1e-4]])
+    grid = sample_elevation(lat_m, lon_m)
+    center = grid[1, 1]
+    if np.isnan(center):
+        finite = grid[np.isfinite(grid)]
+        return float(finite.mean()) if finite.size else float("nan")
+    return float(center)
 
 
 def sample_elevation(lat_m, lon_m, bounds=None):
@@ -138,13 +178,41 @@ def sample_elevation(lat_m, lon_m, bounds=None):
             sel = (mx >= left) & (mx <= right) & (my >= bottom) & (my <= top)
             if not sel.any():
                 continue
-            cols = np.floor((mx[sel] - c) / a).astype(int)
-            rows = np.floor((my[sel] - f) / e).astype(int)
-            valid = (rows >= 0) & (rows < ds.height) & (cols >= 0) & (cols < ds.width)
-            if not valid.any():
-                continue
             data = ds.read(1)
-            out.ravel()[np.where(sel)[0][valid]] = data[rows[valid], cols[valid]]
+            xf = (mx[sel] - c) / a
+            yf = (my[sel] - f) / e
+            out.ravel()[np.where(sel)[0]] = _bilinear_sample(data, xf, yf)
+    return out
+
+
+def _bilinear_sample(data, xf, yf):
+    """Bilinear elevation interpolation at fractional (column, row) coords.
+
+    `xf`/`yf` are the fractional pixel coordinates of the sample points.
+    Points whose 2x2 window falls outside the band (including a 1-px border)
+    return NaN, preserving ``sample_elevation``'s missing-data contract
+    (ocean tiles, tile edges). Bilinear resampling keeps neighbouring coverage
+    pixels continuous instead of the blocky step of nearest-neighbour lookup.
+    """
+    xf = np.asarray(xf, dtype=float)
+    yf = np.asarray(yf, dtype=float)
+    x0 = np.floor(xf).astype(int)
+    y0 = np.floor(yf).astype(int)
+    wx = xf - x0
+    wy = yf - y0
+    h, w = data.shape
+    ok = (y0 >= 0) & (y0 + 1 < h) & (x0 >= 0) & (x0 + 1 < w)
+    out = np.full(xf.shape, np.nan, dtype=float)
+    if not ok.any():
+        return out
+    y0k, x0k = y0[ok], x0[ok]
+    wxk, wyk = wx[ok], wy[ok]
+    v00 = data[y0k, x0k]
+    v01 = data[y0k, x0k + 1]
+    v10 = data[y0k + 1, x0k]
+    v11 = data[y0k + 1, x0k + 1]
+    out[ok] = ((1 - wyk) * ((1 - wxk) * v00 + wxk * v01)
+               + wyk * ((1 - wxk) * v10 + wxk * v11))
     return out
 
 

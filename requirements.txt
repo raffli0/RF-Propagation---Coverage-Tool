@@ -1,0 +1,6 @@
+folium==0.17.0
+numpy==1.23.5
+pillow==10.4.0
+rasterio==1.4.4
+streamlit==1.37.1
+streamlit_folium==0.22.0
